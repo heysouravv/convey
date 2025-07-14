@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Table, Text, DateTime, Float
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship, joinedload
 import datetime
 
 # --- Dummy Data ---
@@ -38,6 +38,7 @@ class User(Base):
     travels = relationship('Travel', back_populates='user')
     birthdays = relationship('Birthday', back_populates='user')
     orders = relationship('Order', back_populates='user')
+    carts = relationship('Cart', back_populates='user')
 
 class Address(Base):
     __tablename__ = 'addresses'
@@ -89,6 +90,7 @@ class Cart(Base):
     user_id = Column(Integer, ForeignKey('users.id'))
     product_id = Column(String)
     quantity = Column(Integer)
+    user = relationship('User', back_populates='carts')
 
 class Order(Base):
     __tablename__ = 'orders'
@@ -261,7 +263,7 @@ def get_travel_status(user_id: str) -> dict:
 
 def checkout(user_id: str) -> str:
     session = SessionLocal()
-    user = session.query(User).filter_by(email=user_id).first()
+    user = session.query(User).options(joinedload(User.addresses), joinedload(User.carts)).filter_by(email=user_id).first()
     if not user:
         session.close()
         return "User not found. Please register."
@@ -273,6 +275,7 @@ def checkout(user_id: str) -> str:
     order_id = str(uuid.uuid4())
     order = Order(user_id=user.id, address=user.addresses[0].address, status="Processing")
     session.add(order)
+    session.commit()  # Commit to get order.id
 
     for item in user.carts:
         product = next((p for p in PRODUCTS if p["id"] == item.product_id), None)
@@ -280,11 +283,8 @@ def checkout(user_id: str) -> str:
             order_item = OrderItem(order_id=order.id, product_id=item.product_id, quantity=item.quantity)
             session.add(order_item)
             product["stock"] = max(0, product["stock"] - item.quantity)
-        else:
-            # If product not found, remove from cart
-            session.delete(item)
+        session.delete(item)  # Remove from cart after checkout
 
-    user.carts = [] # Clear cart after checkout
     session.commit()
     session.close()
     return f"Order placed! Your order ID is {order_id}."
@@ -329,14 +329,16 @@ def get_order_history(user_id: str) -> List[Dict]:
 
 def is_duplicate_order(user_id: str, product_id: str) -> bool:
     session = SessionLocal()
-    user = session.query(User).filter_by(email=user_id).first()
-    session.close()
+    user = session.query(User).options(joinedload(User.orders).joinedload(Order.items)).filter_by(email=user_id).first()
     if not user:
+        session.close()
         return False
     for order in user.orders:
         for item in order.items:
             if item.product_id == product_id:
+                session.close()
                 return True
+    session.close()
     return False
 
 def set_concierge_tone(user_id: str, tone: str) -> str:
